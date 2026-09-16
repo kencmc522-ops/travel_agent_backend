@@ -1,8 +1,0 @@
-{
-  "name": "travel-burst-final-2025",
-  "version": "1.0.0",
-  "engines": {
-    "node": "24.x"
-  },
-  "dependencies": {}
-}

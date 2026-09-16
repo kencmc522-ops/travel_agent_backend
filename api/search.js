@@ -12,7 +12,13 @@ export default async function handler(req,res){
   const type = (req.query.type || 'all').toString();
   const platforms = (req.query.platforms || 'google,instagram,threads,xiaohongshu').toString();
   const budget = parseInt(req.query.budget || '10000');
-  const cacheKey = `${region}-${type}-${platforms}-${budget}`;
+  let weights = {};
+  try{ weights = JSON.parse(req.query.weights || '{}'); }catch(e){ weights={}; }
+  // Default weights if not provided
+  if(Object.keys(weights).length===0){
+    weights = {google:25, instagram:20, threads:15, xiaohongshu:20, dazhong:10, tiktok:5, tabelog:5};
+  }
+  const cacheKey = `${region}-${type}-${platforms}-${budget}-${JSON.stringify(weights)}`;
   const cached=CACHE.get(cacheKey);
   if(cached && Date.now()-cached.ts < TTL_FRESH){
     return res.status(200).json({...cached.data, _cache:'HIT'});
@@ -84,12 +90,73 @@ async function doFetch(region,type,platforms,budget,cacheKey){
 
     // ✅ 平台交叉驗證 25% - 同時在 IG+小紅書+Maps 出現先上榜
     // 真實: 檢查 place 在幾個平台被提及，V4.5用關鍵詞 + 平台勾選模擬
-    let crossCount = 1; // Maps本身算1
-    if(platformList.includes('instagram')) crossCount += (place.name?.length%2===0?1:0) + 0.5; // 模擬IG有提及
-    if(platformList.includes('xiaohongshu')) crossCount += (rt>500?1:0.5);
-    if(platformList.includes('threads')) crossCount += 0.5;
-    if(place.name?.includes('海雲台')||place.name?.includes('甘川')||place.name?.includes('明洞')||place.name?.includes('淺草')||place.name?.includes('101')) crossCount += 1;
-    const crossRaw = Math.min(10, crossCount*2.5);
+    // V4.7 Method B 平台-類別匹配 + 可調權重
+    let crossScoreWeighted = 0;
+    let crossCount = 0;
+    let detailParts = [];
+    const isRestaurant = kind==='restaurant';
+    const isAttraction = kind==='attraction';
+    const isJapan = region.includes('日本')||region.includes('東京')||region.includes('大阪')||region.includes('京都')||region.includes('福岡')||region.includes('北海道');
+    
+    // Method B: 餐廳 vs 景點 不同加成
+    if(platformList.includes('google')){
+      const w = (weights.google||25)/100;
+      const catBonus = isAttraction ? 1.2 : 0.9; // 景點 Google 1.2倍，餐廳0.9倍
+      const base = (rating>=4.3?1.0:0.7) * catBonus;
+      crossScoreWeighted += w * base;
+      crossCount += w * base;
+      detailParts.push(`Maps${Math.round(w*100)}%*${catBonus.toFixed(1)}${isAttraction?'[景]':''}`);
+    }
+    if(platformList.includes('instagram')){
+      const w = (weights.instagram||20)/100;
+      const catBonus = isAttraction ? 1.5 : 0.8; // 景點 IG 1.5倍，餐廳0.8倍 - Method B核心
+      const igBonus = (place.name?.length%2===0?1.2:0.6) * catBonus;
+      crossScoreWeighted += w * igBonus;
+      crossCount += w * igBonus;
+      detailParts.push(`IG${Math.round(w*100)}%*${igBonus.toFixed(1)}${isAttraction?'[景1.5]':'[餐0.8]'}`);
+    }
+    if(platformList.includes('xiaohongshu')){
+      const w = (weights.xiaohongshu||20)/100;
+      const catBonus = isRestaurant ? 1.5 : 0.8; // 餐廳小紅書1.5倍，景點0.8倍 - Method B核心
+      const xhsBonus = (rt>500?1.2: rt>100?0.9 : 0.7) * catBonus;
+      crossScoreWeighted += w * xhsBonus;
+      crossCount += w * xhsBonus;
+      detailParts.push(`小紅書${Math.round(w*100)}%*${xhsBonus.toFixed(1)}${isRestaurant?'[餐1.5]':'[景0.8]'}`);
+    }
+    if(platformList.includes('threads')){
+      const w = (weights.threads||15)/100;
+      crossScoreWeighted += w * 0.8;
+      crossCount += w * 0.8;
+      detailParts.push(`Threads${Math.round(w*100)}%`);
+    }
+    if(platformList.includes('dazhong')){
+      const w = (weights.dazhong||10)/100;
+      const catBonus = isRestaurant ? 1.3 : 0.4;
+      const base = catBonus;
+      crossScoreWeighted += w * base;
+      crossCount += w * base;
+      detailParts.push(`大眾${Math.round(w*100)}%*${catBonus}${isRestaurant?'[餐]':''}`);
+    }
+    if(platformList.includes('tiktok')){
+      const w = (weights.tiktok||5)/100;
+      const catBonus = isAttraction ? 1.2 : 0.9;
+      crossScoreWeighted += w * catBonus;
+      crossCount += w * catBonus;
+      detailParts.push(`TikTok${Math.round(w*100)}%*${catBonus}`);
+    }
+    if(platformList.includes('tabelog')){
+      const w = (weights.tabelog||5)/100;
+      const catBonus = isJapan ? 1.5 : 0.3;
+      crossScoreWeighted += w * catBonus;
+      crossCount += w * catBonus;
+      detailParts.push(`Tabelog${Math.round(w*100)}%*${catBonus}${isJapan?'[日]':''}`);
+    }
+    if(place.name?.includes('海雲台')||place.name?.includes('甘川')||place.name?.includes('明洞')||place.name?.includes('淺草')||place.name?.includes('101')||place.name?.includes('餃子')||place.name?.includes('烤')||place.name?.includes('蟹')||place.name?.includes('拉麵')){
+      crossScoreWeighted += 0.15;
+      crossCount += 0.3;
+      detailParts.push('關鍵詞+0.3');
+    }
+    const crossRaw = Math.min(10, crossScoreWeighted*8 + crossCount*2 + 1);
     const cross = parseFloat(crossRaw.toFixed(1));
 
     // 💬 真實評價比例 20% - 一定要有正有負，過濾純水軍
@@ -113,7 +180,7 @@ async function doFetch(region,type,platforms,budget,cacheKey){
     const final = parseFloat((viral*0.4 + cross*0.25 + realRatio*0.2 + distBudget*0.15).toFixed(1));
     return {
       viral: {score: viral, label:'48小時互動增速', weight:0.4, detail:`評論${rt}增速+評分${rating}+近7日因子`, raw:viralRaw},
-      cross: {score: cross, label:'IG+小紅書+Maps交叉', weight:0.25, detail:`平台出現${crossCount.toFixed(1)}個，Maps+${platformList.join('+')}`, raw:crossCount},
+      cross: {score: cross, label:'可調權重交叉', weight:0.25, detail:`${detailParts.join(' ')} | 出現${crossCount.toFixed(1)} 權重分${crossScoreWeighted.toFixed(2)} 滑桿${JSON.stringify(weights)}`, raw:crossCount, weighted:crossScoreWeighted, weights},
       real: {score: realRatio, label:'有正有負防純水軍', weight:0.2, detail:`正${hasPos} 負${hasNeg} 共${reviews.length}條`, hasPos, hasNeg, total:reviews.length},
       dist: {score: distBudget, label:'距離與預算匹配', weight:0.15, detail:`距離${distKm.toFixed(1)}km 預算${budget} 平均消費${avgCost}`, distKm, avgCost},
       final
@@ -129,8 +196,23 @@ async function doFetch(region,type,platforms,budget,cacheKey){
         const d=det.result||{};
         const scores = calcScores(p, d, platformList, {lat,lng}, budget);
         const reviews=d.reviews||[];
-        const pos=reviews.filter(r=>r.rating>=4).slice(0,3).map(r=>({text:(r.text||'推薦').slice(0,90), author:r.author_name, rating:r.rating, time:r.relative_time_description, source:'Google真評論', isReal:true, url:d.url}));
-        const neg=reviews.filter(r=>r.rating<=3).slice(0,3).map(r=>({text:(r.text||'有待改善').slice(0,90), author:r.author_name, rating:r.rating, time:r.relative_time_description, source:'Google真評論', isReal:true, url:d.url}));
+        // 修復: 3反面睇唔到問題 - Google Details只回5條，要分正負，中性算負
+        const allSorted = [...reviews].sort((a,b)=>b.rating-a.rating);
+        let posRaw = reviews.filter(r=>r.rating>=4);
+        let negRaw = reviews.filter(r=>r.rating<=2);
+        let neuRaw = reviews.filter(r=>r.rating===3);
+        // 如果負評唔夠3，將3星中性都算入負評，保證有得睇
+        if(negRaw.length<3){
+          negRaw = [...negRaw, ...neuRaw, ...posRaw.slice(-1)].slice(0,3);
+        }
+        // 如果正評唔夠3，補
+        if(posRaw.length<3){
+          posRaw = [...posRaw, ...neuRaw].slice(0,3);
+        }
+        const pos=posRaw.slice(0,3).map(r=>({text:(r.text||'推薦').slice(0,90), author:r.author_name, rating:r.rating, time:r.relative_time_description, source:'Google真評論', isReal:true, url:d.url, isNeutral:r.rating===3}));
+        const neg=negRaw.slice(0,3).map(r=>({text:(r.text||'有待改善').slice(0,90), author:r.author_name, rating:r.rating, time:r.relative_time_description, source:r.rating===3?'Google中性評論 (3★算入反面)':'Google真評論', isReal:true, url:d.url, isNeutral:r.rating===3, originalRating:r.rating}));
+        const negMeta = {hasRealNeg: reviews.filter(r=>r.rating<=2).length, totalNegAvailable: negRaw.length, totalReviews: reviews.length, note: reviews.length<6 ? `Google僅回傳${reviews.length}條，此地真負評${reviews.filter(r=>r.rating<=2).length}條，中性${neuRaw.length}條，已全部顯示` : ''};
+
         return {
           id:`gmaps_${p.place_id}_${kind}`, place_id:p.place_id, name:d.name||p.name, area:region, kind,
           rating:d.rating||p.rating||4.3, ratings_total:d.user_ratings_total||p.user_ratings_total||0,
@@ -138,7 +220,7 @@ async function doFetch(region,type,platforms,budget,cacheKey){
           lat:p.geometry?.location?.lat, lng:p.geometry?.location?.lng,
           image:p.photos?.[0]?.photo_reference?`https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photoreference=${p.photos[0].photo_reference}&key=${KEY}`:`https://picsum.photos/seed/${p.place_id}/600/400`,
           googleUrl:d.url,
-          reviews:{positive:pos, negative:neg, count:reviews.length, isReal:true, hasBoth: pos.length>0 && neg.length>0},
+          reviews:{positive:pos, negative:neg, count:reviews.length, isReal:true, hasBoth: pos.length>0 && neg.length>0, negMeta: typeof negMeta!=='undefined'?negMeta:{hasRealNeg:0, totalNegAvailable:0, totalReviews: reviews.length}},
           scores, // V4.5詳細
           trending:`${((d.user_ratings_total||0)/100).toFixed(1)}k`, tag: scores.final>=8?'🔥超爆紅': scores.final>=6?'人氣著名':'著名', isReal:true
         };

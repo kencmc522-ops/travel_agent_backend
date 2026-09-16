@@ -1,7 +1,7 @@
 
 // V4.5 - 排名根據詳細modal: 爆紅40% + 交叉驗證25% + 真實評價20% + 距離預算15%
-const CACHE = globalThis.__TB_V4_5_CACHE__ || (globalThis.__TB_V4_5_CACHE__ = new Map());
-const TTL_FRESH = 2*24*60*60*1000;
+const CACHE = globalThis.__TB_V4_9_CACHE__ || (globalThis.__TB_V4_9_CACHE__ = new Map()); // V4.9 新cache key，舊空cache失效
+const TTL_FRESH = 0; // V4.9 修你張圖 positive[]空 - 禁Cache
 
 export default async function handler(req,res){
   res.setHeader('Access-Control-Allow-Origin','*');
@@ -19,25 +19,17 @@ export default async function handler(req,res){
     weights = {google:25, instagram:20, threads:15, xiaohongshu:20, dazhong:10, tiktok:5, tabelog:5};
   }
   const cacheKey = `${region}-${type}-${platforms}-${budget}-${JSON.stringify(weights)}`;
-  const cached=CACHE.get(cacheKey);
-  if(cached && Date.now()-cached.ts < TTL_FRESH){
-    return res.status(200).json({...cached.data, _cache:'HIT'});
-  }
-  try{
-    const data=await doFetch(region,type,platforms,budget,cacheKey);
-    // Debug: add key check
-    const hasKey = !!process.env.GOOGLE_MAPS_API_KEY;
-    return res.status(200).json({...data, _debug:{hasKey, region, attractionsCount: data.attractions?.length, restaurantsCount: data.restaurants?.length, sampleReviews: data.attractions?.[0]?.reviews?.count||0 }, _cache:'MISS'});
-  }catch(e){
+    const cached = null; // V4.9 強制MISS，修你張圖空評論
+catch(e){
     if(cached) return res.status(200).json({...cached.data, error:e.message, _cache:'FALLBACK'});
     return res.status(500).json({error:e.message});
   }
 }
 
 async function doFetch(region,type,platforms,budget,cacheKey){
-  const KEY=process.env.GOOGLE_MAPS_API_KEY || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-  if(!KEY) throw new Error('Missing GOOGLE_MAPS_API_KEY - 請去Vercel Settings → Environment Variables 加入 GOOGLE_MAPS_API_KEY');
-  console.log('Using KEY prefix', KEY.slice(0,10));
+  const KEY=(process.env.GOOGLE_MAPS_API_KEY || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || "").trim();
+  if(!KEY){ throw new Error("Missing GOOGLE_MAPS_API_KEY"); }
+  if(!KEY) throw new Error('Missing GOOGLE_MAPS_API_KEY');
 
   // Geocode
   let lat,lng,formatted;
@@ -193,54 +185,50 @@ async function doFetch(region,type,platforms,budget,cacheKey){
   async function enrich(places, kind){
     const platformList = platforms.split(',').map(s=>s.trim());
     const enriched = await Promise.all(places.map(async (p)=>{
+      let d={};
+      let reviews=[];
       try{
-        const detailsUrl=`https://maps.googleapis.com/maps/api/place/details/json?place_id=${p.place_id}&fields=name,rating,user_ratings_total,formatted_address,geometry,photos,reviews,url,website,opening_hours,types&language=zh-TW&key=${KEY}`;
-        const det=await fetch(detailsUrl).then(r=>r.json());
-        if(det.status!=='OK'){ console.error('Details failed', p.place_id, det.status, det.error_message); }
-        const d=det.result||{};
-        if(!d.reviews || d.reviews.length===0){ console.warn('No reviews for', p.name, p.place_id, 'status', det.status); }
-        const scores = calcScores(p, d, platformList, {lat,lng}, budget);
-        const reviews=d.reviews||[];
-        // V4.8.2 真評論還原 - 唔假造正評，負評唔夠先用中性+最低分正評補
-        const allSortedAsc = [...reviews].sort((a,b)=>a.rating-b.rating); // 最低分排頭
-        const allSortedDesc = [...reviews].sort((a,b)=>b.rating-a.rating);
-        let posRaw = reviews.filter(r=>r.rating>=4);
-        let negReal = reviews.filter(r=>r.rating<=2);
-        let neuRaw = reviews.filter(r=>r.rating===3);
-        // 正評保證3條
-        let pos = [...posRaw];
-        if(pos.length<3){
-          pos = [...pos, ...neuRaw].slice(0,3);
-        }
-        // 反面：真負評 + 中性 + 最低分正評
-        let negCombined = [...negReal];
-        if(negCombined.length<3) negCombined = [...negCombined, ...neuRaw];
-        if(negCombined.length<3){
-          const lowestPos = allSortedAsc.filter(r=>r.rating>=4);
-          negCombined = [...negCombined, ...lowestPos];
-        }
-        // 去重
-        const seenNeg = new Set();
-        let neg = [];
-        for(const r of negCombined){
-          const k=(r.author_name||'')+(r.text||'').slice(0,15);
-          if(!seenNeg.has(k)){ seenNeg.add(k); neg.push(r); }
-          if(neg.length>=3) break;
-        }
-        pos = allSortedDesc.filter(r=>r.rating>=4).slice(0,3);
-        // 如果 reviews 本身空，唔好造假
+        // 先試 zh-TW
+        let detailsUrl=`https://maps.googleapis.com/maps/api/place/details/json?place_id=${p.place_id}&fields=name,rating,user_ratings_total,formatted_address,geometry,photos,reviews,url,website,opening_hours,types&language=zh-TW&key=${KEY}`;
+        let det=await fetch(detailsUrl).then(r=>r.json());
+        d=det.result||{};
+        reviews=d.reviews||[];
+        // 如果 zh-TW 無評論，再試 en 保底 (有些店只有英文評論)
         if(reviews.length===0){
-          pos = [];
-          neg = [];
+          let detailsUrlEn=`https://maps.googleapis.com/maps/api/place/details/json?place_id=${p.place_id}&fields=name,rating,user_ratings_total,formatted_address,geometry,photos,reviews,url,website,opening_hours,types&language=en&key=${KEY}`;
+          let detEn=await fetch(detailsUrlEn).then(r=>r.json());
+          if(detEn.result && detEn.result.reviews && detEn.result.reviews.length>0){
+            d={...d, ...detEn.result, reviews: detEn.result.reviews};
+            reviews=d.reviews;
+          }
         }
-        const negMeta = {
-          hasRealNeg: negReal.length,
-          hasNeu: neuRaw.length,
-          hasRealPos: posRaw.length,
-          totalReviews: reviews.length,
-          isRealData: reviews.length>0,
-          note: reviews.length===0 ? 'Google無回傳評論 - 請檢查Vercel GOOGLE_MAPS_API_KEY有無過期/Places API有無啟用' : (negReal.length===0 ? `真負評0條，中性${neuRaw.length}條，已用中性+最低分正評補齊保底3反面` : `真負評${negReal.length}條`),
-        };
+        console.log(`V4.9 ${p.name} reviews=${reviews.length} status=${det.status}`);
+      }catch(e){ console.error('details error', p.place_id, e); }
+      const allSortedAsc = [...reviews].sort((a,b)=>a.rating-b.rating);
+      const allSortedDesc = [...reviews].sort((a,b)=>b.rating-a.rating);
+      let posRaw = reviews.filter(r=>r.rating>=4);
+      let negReal = reviews.filter(r=>r.rating<=2);
+      let neuRaw = reviews.filter(r=>r.rating===3);
+      let pos = allSortedDesc.filter(r=>r.rating>=4).slice(0,3);
+      let negCombined = [...negReal];
+      if(negCombined.length<3) negCombined = [...negCombined, ...neuRaw];
+      if(negCombined.length<3){
+        const lowestPos = allSortedAsc.filter(r=>r.rating>=4);
+        negCombined = [...negCombined, ...lowestPos];
+      }
+      const seenNeg = new Set(); let neg=[];
+      for(const r of negCombined){ const k=(r.author_name||'')+(r.text||'').slice(0,15); if(!seenNeg.has(k)){ seenNeg.add(k); neg.push(r);} if(neg.length>=3) break; }
+      if(reviews.length===0){ pos=[]; neg=[]; }
+      const negMeta = {
+        hasRealNeg: negReal.length,
+        hasNeu: neuRaw.length,
+        hasRealPos: posRaw.length,
+        totalReviews: reviews.length,
+        isRealData: reviews.length>0,
+        note: reviews.length===0 ? 'Google此地暫無reviews' : `真負評${negReal.length} 中性${neuRaw.length} 正評${posRaw.length}`,
+      };
+      const posFinal = pos.map(r=>({text:(r.text||'推薦').slice(0,120), author:r.author_name||'匿名', rating:r.rating, time:r.relative_time_description||'', source:'Google真評論', isReal:true, url:d.url||`https://www.google.com/maps/place/?q=place_id:${p.place_id}`, originalRating:r.rating}));
+      const negFinal = neg.map(r=>{ const isNeu=r.rating===3; const isLow=r.rating>=4; let sl='Google真評論'; if(isNeu) sl='Google中性3★算入反面'; else if(isLow) sl=`Google最低分正評★${r.rating}轉入反面`; return {text:(r.text||'有待改善').slice(0,120), author:r.author_name||'匿名', rating:r.rating, time:r.relative_time_description||'', source:sl, isReal:true, url:d.url||`https://www.google.com/maps/place/?q=place_id:${p.place_id}`, isNeutral:isNeu, isLowPos:isLow, isRealNeg:r.rating<=2, originalRating:r.rating}; });
 
 
 
@@ -251,7 +239,8 @@ async function doFetch(region,type,platforms,budget,cacheKey){
           lat:p.geometry?.location?.lat, lng:p.geometry?.location?.lng,
           image:p.photos?.[0]?.photo_reference?`https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photoreference=${p.photos[0].photo_reference}&key=${KEY}`:`https://picsum.photos/seed/${p.place_id}/600/400`,
           googleUrl:d.url,
-          reviews:{positive:posVar||posFinal, negative:negVar||negFinal, count:reviews.length, isReal:true, hasBoth: true, negMeta: typeof negMeta!=='undefined'?negMeta:{hasRealNeg:0, totalReviews: reviews.length, isGuaranteed:true}},
+          reviews:{positive: posFinal, negative: negFinal, count: reviews.length, isReal: reviews.length>0, hasBoth: posFinal.length>0 || negFinal.length>0, negMeta: negMeta},
+
           scores, // V4.5詳細
           trending:`${((d.user_ratings_total||0)/100).toFixed(1)}k`, tag: scores.final>=8?'🔥超爆紅': scores.final>=6?'人氣著名':'著名', isReal:true
         };

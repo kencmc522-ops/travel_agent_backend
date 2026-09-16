@@ -196,57 +196,22 @@ async function doFetch(region,type,platforms,budget,cacheKey){
         const d=det.result||{};
         const scores = calcScores(p, d, platformList, {lat,lng}, budget);
         const reviews=d.reviews||[];
-        // V4.8.1 真評論還原 - 保底3反面但唔假造正評
-        const allSortedAsc = [...reviews].sort((a,b)=>a.rating-b.rating);
-        const allSortedDesc = [...reviews].sort((a,b)=>b.rating-a.rating);
-        const posRaw = reviews.filter(r=>r.rating>=4);
-        const negReal = reviews.filter(r=>r.rating<=2);
-        const neuRaw = reviews.filter(r=>r.rating===3);
-        // 正評：只顯示真實正評，唔夠3就顯示有幾多得幾多，唔用系統假造
-        const pos = allSortedDesc.filter(r=>r.rating>=4).slice(0,3).map(r=>({
-          text:(r.text||'推薦').slice(0,100), author:r.author_name||'匿名', rating:r.rating, time:r.relative_time_description||'', source:'Google真評論', isReal:true, url:d.url, isNeutral:false
-        }));
-        // 反面：真負評 + 中性 + 最低分正評補齊，但標明
-        let negCombined = [...negReal];
-        if(negCombined.length<3) negCombined = [...negCombined, ...neuRaw];
-        if(negCombined.length<3){
-          const lowestPos = allSortedAsc.filter(r=>r.rating>=4);
-          negCombined = [...negCombined, ...lowestPos];
+        // 修復: 3反面睇唔到問題 - Google Details只回5條，要分正負，中性算負
+        const allSorted = [...reviews].sort((a,b)=>b.rating-a.rating);
+        let posRaw = reviews.filter(r=>r.rating>=4);
+        let negRaw = reviews.filter(r=>r.rating<=2);
+        let neuRaw = reviews.filter(r=>r.rating===3);
+        // 如果負評唔夠3，將3星中性都算入負評，保證有得睇
+        if(negRaw.length<3){
+          negRaw = [...negRaw, ...neuRaw, ...posRaw.slice(-1)].slice(0,3);
         }
-        // 去重
-        const seen = new Set();
-        let negDedup=[];
-        for(const r of negCombined){
-          const key=(r.author_name||'')+(r.text||'').slice(0,20);
-          if(!seen.has(key)){ seen.add(key); negDedup.push(r); }
-          if(negDedup.length>=3) break;
+        // 如果正評唔夠3，補
+        if(posRaw.length<3){
+          posRaw = [...posRaw, ...neuRaw].slice(0,3);
         }
-        const neg = negDedup.slice(0,3).map(r=>{
-          const isNeu = r.rating===3;
-          const isLowPos = r.rating>=4;
-          let srcLabel = 'Google真評論';
-          if(isNeu) srcLabel='Google中性評論 (3★) 算入反面';
-          else if(isLowPos) srcLabel=`Google最低分正評 (★${r.rating}) 轉入反面參考`;
-          return {text:(r.text||'有待改善').slice(0,100), author:r.author_name||'匿名', rating:r.rating, time:r.relative_time_description||'', source:srcLabel, isReal:true, url:d.url, isNeutral:isNeu, isLowPos:isLowPos, isRealNeg:r.rating<=2, originalRating:r.rating};
-        });
-        // 如果完全無評論
-        let posFinal = pos;
-        let negFinal = neg;
-        if(reviews.length===0){
-          posFinal = [];
-          negFinal = [];
-        }
-        const negMeta = {
-          hasRealNeg: negReal.length,
-          hasNeu: neuRaw.length,
-          hasRealPos: posRaw.length,
-          totalReviews: reviews.length,
-          note: reviews.length===0 ? '此地Google暫無評論' : reviews.length<6 ? `Google僅回${reviews.length}條，真負評${negReal.length}條，中性${neuRaw.length}條，已顯示真實評論` : `真負評${negReal.length}條，已補齊3反面`,
-          isRealData: reviews.length>0
-        };
-        const posVar = posFinal;
-        const negVar = negFinal;
-
+        const pos=posRaw.slice(0,3).map(r=>({text:(r.text||'推薦').slice(0,90), author:r.author_name, rating:r.rating, time:r.relative_time_description, source:'Google真評論', isReal:true, url:d.url, isNeutral:r.rating===3}));
+        const neg=negRaw.slice(0,3).map(r=>({text:(r.text||'有待改善').slice(0,90), author:r.author_name, rating:r.rating, time:r.relative_time_description, source:r.rating===3?'Google中性評論 (3★算入反面)':'Google真評論', isReal:true, url:d.url, isNeutral:r.rating===3, originalRating:r.rating}));
+        const negMeta = {hasRealNeg: reviews.filter(r=>r.rating<=2).length, totalNegAvailable: negRaw.length, totalReviews: reviews.length, note: reviews.length<6 ? `Google僅回傳${reviews.length}條，此地真負評${reviews.filter(r=>r.rating<=2).length}條，中性${neuRaw.length}條，已全部顯示` : ''};
 
         return {
           id:`gmaps_${p.place_id}_${kind}`, place_id:p.place_id, name:d.name||p.name, area:region, kind,
@@ -255,7 +220,7 @@ async function doFetch(region,type,platforms,budget,cacheKey){
           lat:p.geometry?.location?.lat, lng:p.geometry?.location?.lng,
           image:p.photos?.[0]?.photo_reference?`https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photoreference=${p.photos[0].photo_reference}&key=${KEY}`:`https://picsum.photos/seed/${p.place_id}/600/400`,
           googleUrl:d.url,
-          reviews:{positive: (typeof posVar!=='undefined'?posVar:pos), negative: (typeof negVar!=='undefined'?negVar:neg), count:reviews.length, isReal:true, hasBoth: true, negMeta: typeof negMeta!=='undefined'?negMeta:{hasRealNeg:0, totalReviews: reviews.length, isRealData: reviews.length>0}},
+          reviews:{positive:pos, negative:neg, count:reviews.length, isReal:true, hasBoth: pos.length>0 && neg.length>0, negMeta: typeof negMeta!=='undefined'?negMeta:{hasRealNeg:0, totalNegAvailable:0, totalReviews: reviews.length}},
           scores, // V4.5詳細
           trending:`${((d.user_ratings_total||0)/100).toFixed(1)}k`, tag: scores.final>=8?'🔥超爆紅': scores.final>=6?'人氣著名':'著名', isReal:true
         };

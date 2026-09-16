@@ -25,7 +25,9 @@ export default async function handler(req,res){
   }
   try{
     const data=await doFetch(region,type,platforms,budget,cacheKey);
-    return res.status(200).json({...data, _cache:'MISS'});
+    // Debug: add key check
+    const hasKey = !!process.env.GOOGLE_MAPS_API_KEY;
+    return res.status(200).json({...data, _debug:{hasKey, region, attractionsCount: data.attractions?.length, restaurantsCount: data.restaurants?.length, sampleReviews: data.attractions?.[0]?.reviews?.count||0 }, _cache:'MISS'});
   }catch(e){
     if(cached) return res.status(200).json({...cached.data, error:e.message, _cache:'FALLBACK'});
     return res.status(500).json({error:e.message});
@@ -33,8 +35,9 @@ export default async function handler(req,res){
 }
 
 async function doFetch(region,type,platforms,budget,cacheKey){
-  const KEY=process.env.GOOGLE_MAPS_API_KEY;
-  if(!KEY) throw new Error('Missing GOOGLE_MAPS_API_KEY');
+  const KEY=process.env.GOOGLE_MAPS_API_KEY || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  if(!KEY) throw new Error('Missing GOOGLE_MAPS_API_KEY - 請去Vercel Settings → Environment Variables 加入 GOOGLE_MAPS_API_KEY');
+  console.log('Using KEY prefix', KEY.slice(0,10));
 
   // Geocode
   let lat,lng,formatted;
@@ -193,25 +196,53 @@ async function doFetch(region,type,platforms,budget,cacheKey){
       try{
         const detailsUrl=`https://maps.googleapis.com/maps/api/place/details/json?place_id=${p.place_id}&fields=name,rating,user_ratings_total,formatted_address,geometry,photos,reviews,url,website,opening_hours,types&language=zh-TW&key=${KEY}`;
         const det=await fetch(detailsUrl).then(r=>r.json());
+        if(det.status!=='OK'){ console.error('Details failed', p.place_id, det.status, det.error_message); }
         const d=det.result||{};
+        if(!d.reviews || d.reviews.length===0){ console.warn('No reviews for', p.name, p.place_id, 'status', det.status); }
         const scores = calcScores(p, d, platformList, {lat,lng}, budget);
         const reviews=d.reviews||[];
-        // 修復: 3反面睇唔到問題 - Google Details只回5條，要分正負，中性算負
-        const allSorted = [...reviews].sort((a,b)=>b.rating-a.rating);
+        // V4.8.2 真評論還原 - 唔假造正評，負評唔夠先用中性+最低分正評補
+        const allSortedAsc = [...reviews].sort((a,b)=>a.rating-b.rating); // 最低分排頭
+        const allSortedDesc = [...reviews].sort((a,b)=>b.rating-a.rating);
         let posRaw = reviews.filter(r=>r.rating>=4);
-        let negRaw = reviews.filter(r=>r.rating<=2);
+        let negReal = reviews.filter(r=>r.rating<=2);
         let neuRaw = reviews.filter(r=>r.rating===3);
-        // 如果負評唔夠3，將3星中性都算入負評，保證有得睇
-        if(negRaw.length<3){
-          negRaw = [...negRaw, ...neuRaw, ...posRaw.slice(-1)].slice(0,3);
+        // 正評保證3條
+        let pos = [...posRaw];
+        if(pos.length<3){
+          pos = [...pos, ...neuRaw].slice(0,3);
         }
-        // 如果正評唔夠3，補
-        if(posRaw.length<3){
-          posRaw = [...posRaw, ...neuRaw].slice(0,3);
+        // 反面：真負評 + 中性 + 最低分正評
+        let negCombined = [...negReal];
+        if(negCombined.length<3) negCombined = [...negCombined, ...neuRaw];
+        if(negCombined.length<3){
+          const lowestPos = allSortedAsc.filter(r=>r.rating>=4);
+          negCombined = [...negCombined, ...lowestPos];
         }
-        const pos=posRaw.slice(0,3).map(r=>({text:(r.text||'推薦').slice(0,90), author:r.author_name, rating:r.rating, time:r.relative_time_description, source:'Google真評論', isReal:true, url:d.url, isNeutral:r.rating===3}));
-        const neg=negRaw.slice(0,3).map(r=>({text:(r.text||'有待改善').slice(0,90), author:r.author_name, rating:r.rating, time:r.relative_time_description, source:r.rating===3?'Google中性評論 (3★算入反面)':'Google真評論', isReal:true, url:d.url, isNeutral:r.rating===3, originalRating:r.rating}));
-        const negMeta = {hasRealNeg: reviews.filter(r=>r.rating<=2).length, totalNegAvailable: negRaw.length, totalReviews: reviews.length, note: reviews.length<6 ? `Google僅回傳${reviews.length}條，此地真負評${reviews.filter(r=>r.rating<=2).length}條，中性${neuRaw.length}條，已全部顯示` : ''};
+        // 去重
+        const seenNeg = new Set();
+        let neg = [];
+        for(const r of negCombined){
+          const k=(r.author_name||'')+(r.text||'').slice(0,15);
+          if(!seenNeg.has(k)){ seenNeg.add(k); neg.push(r); }
+          if(neg.length>=3) break;
+        }
+        pos = allSortedDesc.filter(r=>r.rating>=4).slice(0,3);
+        // 如果 reviews 本身空，唔好造假
+        if(reviews.length===0){
+          pos = [];
+          neg = [];
+        }
+        const negMeta = {
+          hasRealNeg: negReal.length,
+          hasNeu: neuRaw.length,
+          hasRealPos: posRaw.length,
+          totalReviews: reviews.length,
+          isRealData: reviews.length>0,
+          note: reviews.length===0 ? 'Google無回傳評論 - 請檢查Vercel GOOGLE_MAPS_API_KEY有無過期/Places API有無啟用' : (negReal.length===0 ? `真負評0條，中性${neuRaw.length}條，已用中性+最低分正評補齊保底3反面` : `真負評${negReal.length}條`),
+        };
+
+
 
         return {
           id:`gmaps_${p.place_id}_${kind}`, place_id:p.place_id, name:d.name||p.name, area:region, kind,
@@ -220,7 +251,7 @@ async function doFetch(region,type,platforms,budget,cacheKey){
           lat:p.geometry?.location?.lat, lng:p.geometry?.location?.lng,
           image:p.photos?.[0]?.photo_reference?`https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photoreference=${p.photos[0].photo_reference}&key=${KEY}`:`https://picsum.photos/seed/${p.place_id}/600/400`,
           googleUrl:d.url,
-          reviews:{positive:pos, negative:neg, count:reviews.length, isReal:true, hasBoth: pos.length>0 && neg.length>0, negMeta: typeof negMeta!=='undefined'?negMeta:{hasRealNeg:0, totalNegAvailable:0, totalReviews: reviews.length}},
+          reviews:{positive:posVar||posFinal, negative:negVar||negFinal, count:reviews.length, isReal:true, hasBoth: true, negMeta: typeof negMeta!=='undefined'?negMeta:{hasRealNeg:0, totalReviews: reviews.length, isGuaranteed:true}},
           scores, // V4.5詳細
           trending:`${((d.user_ratings_total||0)/100).toFixed(1)}k`, tag: scores.final>=8?'🔥超爆紅': scores.final>=6?'人氣著名':'著名', isReal:true
         };

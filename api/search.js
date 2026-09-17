@@ -1,5 +1,5 @@
 
-const CACHE = globalThis.__TB_V4_16_CACHE__ || (globalThis.__TB_V4_16_CACHE__ = new Map());
+const CACHE = globalThis.__TB_V4_18_CACHE__ || (globalThis.__TB_V4_18_CACHE__ = new Map());
 
 export default async function handler(req,res){
   res.setHeader('Access-Control-Allow-Origin','*');
@@ -17,7 +17,7 @@ export default async function handler(req,res){
   if(Object.keys(weights).length===0){ weights = {google:25, instagram:20, threads:15, xiaohongshu:20, dazhong:10, tiktok:5, tabelog:5}; }
   try{
     const data=await doFetch(region,type,platforms,budget,weights,famousOnly,minReviews);
-    return res.status(200).json({...data, _cache:'MISS', _ver:'V4.16'});
+    return res.status(200).json({...data, _cache:'MISS', _ver:'V4.18 neg5'});
   }catch(e){
     console.error('V4.16 error', e);
     return res.status(500).json({error:e.message, stack:e.stack?.slice(0,500), region});
@@ -162,7 +162,7 @@ async function doFetch(region,type,platforms,budget,weights,famousOnly,minReview
       let negReal = allReviews.filter(r=>r.rating<=2);
       let neuRaw = allReviews.filter(r=>r.rating===3);
       let negCombined = [...negReal, ...neuRaw, ...allSortedAsc.filter(r=>r.rating>=4)];
-      const seenNeg=new Set(); let neg=[]; for(const r of negCombined){ const k=(r.author_name||'')+(r.text||'').slice(0,15); if(!seenNeg.has(k)){ seenNeg.add(k); neg.push(r);} if(neg.length>=3) break; }
+      const seenNeg=new Set(); let neg=[]; for(const r of negCombined){ const k=(r.author_name||'')+(r.text||'').slice(0,15); if(!seenNeg.has(k)){ seenNeg.add(k); neg.push(r);} if(neg.length>=5) break; }
       const negMeta = {hasRealNeg: negReal.length, hasNeu: neuRaw.length, totalReviews: allReviews.length, localLang, countryCode, formula: `zh-TW 4 + en 4 + ${localLang} 7 動態 去重優先zh-TW`};
       const posFinal = pos.map(r=>({text:(r.text||'推薦').slice(0,120), author:r.author_name||'匿名', rating:r.rating, source:`Google真評論 [${r._lang}]`, isReal:true, url: url||''}));
       const negFinal = neg.map(r=>({text:(r.text||'有待改善').slice(0,120), author:r.author_name||'匿名', rating:r.rating, source: r.rating===3?`中性3★ [${r._lang}]`: r.rating>=4?`最低分正評 [${r._lang}]`:`真負評 [${r._lang}]`, isReal:true, url: url||''}));

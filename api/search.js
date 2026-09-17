@@ -1,5 +1,5 @@
 
-const CACHE = globalThis.__TB_V4_18_CACHE__ || (globalThis.__TB_V4_18_CACHE__ = new Map());
+const CACHE = globalThis.__TB_V4_19_NEG_CACHE__ || (globalThis.__TB_V4_19_NEG_CACHE__ = new Map());
 
 export default async function handler(req,res){
   res.setHeader('Access-Control-Allow-Origin','*');
@@ -17,7 +17,7 @@ export default async function handler(req,res){
   if(Object.keys(weights).length===0){ weights = {google:25, instagram:20, threads:15, xiaohongshu:20, dazhong:10, tiktok:5, tabelog:5}; }
   try{
     const data=await doFetch(region,type,platforms,budget,weights,famousOnly,minReviews);
-    return res.status(200).json({...data, _cache:'MISS', _ver:'V4.18 neg5'});
+    return res.status(200).json({...data, _cache:'MISS', _ver:'V4.19 NegFixed 1正5負'});
   }catch(e){
     console.error('V4.16 error', e);
     return res.status(500).json({error:e.message, stack:e.stack?.slice(0,500), region});

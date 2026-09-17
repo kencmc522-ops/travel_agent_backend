@@ -1,5 +1,5 @@
-// V4.10 - V4.8原版基礎，只修 500 + 空評論，UI不變
-const CACHE = globalThis.__TB_V4_10_CACHE__ || (globalThis.__TB_V4_10_CACHE__ = new Map());
+// V4.13 - V4.8原版基礎，只修 500 + 空評論，UI不變
+const CACHE = globalThis.__TB_V4_13_CACHE__ || (globalThis.__TB_V4_13_CACHE__ = new Map());
 
 export default async function handler(req,res){
   res.setHeader('Access-Control-Allow-Origin','*');
@@ -15,17 +15,19 @@ export default async function handler(req,res){
   if(Object.keys(weights).length===0){
     weights = {google:25, instagram:20, threads:15, xiaohongshu:20, dazhong:10, tiktok:5, tabelog:5};
   }
+  const famousOnly = (req.query.famousOnly||'true').toString() !== 'false';
+  const minReviews = parseInt(req.query.minReviews||'20');
   try{
-    const data=await doFetch(region,type,platforms,budget,weights);
-    return res.status(200).json({...data, _cache:'MISS', _ver:'V4.10'});
+    const data=await doFetch(region,type,platforms,budget,weights,famousOnly,minReviews);
+    return res.status(200).json({...data, _cache:'MISS', _ver:'V4.13'});
   }catch(e){
-    console.error('V4.10 error', e);
+    console.error('V4.13 error', e);
     return res.status(500).json({error:e.message, stack:e.stack});
   }
 }
 
 
-async function doFetch(region,type,platforms,budget,weights){
+async function doFetch(region,type,platforms,budget,weights,famousOnly=true,minReviews=20){
   const KEY=(process.env.GOOGLE_MAPS_API_KEY || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || "").trim();
   if(!KEY) throw new Error('Missing GOOGLE_MAPS_API_KEY - 請去Vercel Settings加入');
   const SERP_KEY = (process.env.SERPAPI_KEY || "").trim(); // 可選，有就真搜，無就估算
@@ -66,11 +68,10 @@ async function doFetch(region,type,platforms,budget,weights){
       const rt=p.user_ratings_total||0; const rating=p.rating||0;
       const blacklist=['碼頭','埠頭','停車場','管理處','부두','주차장','센터'];
       if(blacklist.some(b=>(p.name||'').includes(b))) return false;
-      return rt>=30 && rating>=4.0;
-    }).sort((a,b)=> (b.user_ratings_total||0)-(a.user_ratings_total||0)).slice(0,15);
+      return rt>=20 && rating>=3.8;
+    }).sort((a,b)=> (b.user_ratings_total||0)-(a.user_ratings_total||0)).slice(0,20);
   }
-  attractionRaw=filterFamous(attractionRaw);
-  restaurantRaw=filterFamous(restaurantRaw);
+  if(famousOnly){ attractionRaw=filterFamous(attractionRaw); restaurantRaw=filterFamous(restaurantRaw); } else { attractionRaw=attractionRaw.filter(p=> (p.user_ratings_total||0)>=minReviews).slice(0,20); restaurantRaw=restaurantRaw.filter(p=> (p.user_ratings_total||0)>=minReviews).slice(0,20); }
 
   // V4.11 新增：社交提及數 (方案3)
   
